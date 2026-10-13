@@ -1,0 +1,6 @@
+pandas
+openpyxl
+pymongo
+python-dotenv
+playwright
+requests

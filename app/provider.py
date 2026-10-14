@@ -1,4 +1,6 @@
 import re
+from datetime import datetime, timezone
+
 import requests
 
 from app import config
@@ -18,6 +20,110 @@ def username_from_url(url):
         raise ProviderError("No LinkedIn username in URL", retryable=False, status="needs_review")
     return m.group(1)
 
+
+
+# --------------------------------------------------------------------------
+# Employment date helpers
+# --------------------------------------------------------------------------
+_MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+           "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+_MONTH_NUM = {m.lower(): i + 1 for i, m in enumerate(_MONTHS)}
+_DATE_RANGE_KEYS = ("date_range", "dates", "date", "duration", "period", "time_period")
+_START_KEYS = ("start_date", "starts_at", "start", "from", "start_year")
+_END_KEYS = ("end_date", "ends_at", "end", "to", "end_year")
+
+
+def _first(d, keys):
+    for k in keys:
+        v = d.get(k)
+        if v not in (None, "", {}):
+            return v
+    return None
+
+
+def _to_ym(value):
+    """Return (year, month|None) from dict / 'Aug 2021' / '2021-08-01' / 2021."""
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        y = value.get("year")
+        m = value.get("month")
+        if not y:
+            return None
+        try:
+            return int(y), (int(m) if m else None)
+        except (TypeError, ValueError):
+            return None
+    text = str(value).strip()
+    m = re.match(r"^(\d{4})-(\d{1,2})", text)          # 2021-08 / 2021-08-01
+    if m:
+        return int(m.group(1)), int(m.group(2))
+    m = re.search(r"([A-Za-z]{3,9})\.?\s+(\d{4})", text)  # Aug 2021
+    if m and m.group(1)[:3].lower() in _MONTH_NUM:
+        return int(m.group(2)), _MONTH_NUM[m.group(1)[:3].lower()]
+    m = re.search(r"(\d{4})", text)                      # 2021
+    if m:
+        return int(m.group(1)), None
+    return None
+
+
+def _label(ym):
+    y, m = ym
+    return f"{_MONTHS[m - 1]} {y}" if m else str(y)
+
+
+def _duration_text(start, end):
+    """LinkedIn-style inclusive duration: Aug 2021 -> Oct 2026 = '5 yrs 3 mos'."""
+    sy, sm = start[0], start[1] or 1
+    ey, em = end[0], end[1] or 12
+    months = (ey - sy) * 12 + (em - sm) + 1
+    if months < 1:
+        return None
+    yrs, mos = divmod(months, 12)
+    parts = []
+    if yrs:
+        parts.append(f"{yrs} yr{'s' if yrs > 1 else ''}")
+    if mos:
+        parts.append(f"{mos} mo{'s' if mos > 1 else ''}")
+    return " ".join(parts)
+
+
+def employment_dates(exp):
+    """Build 'Aug 2021 - Present · 5 yrs 3 mos' from whatever the API gave us."""
+    if not isinstance(exp, dict):
+        return None
+    raw = _first(exp, _DATE_RANGE_KEYS)
+    now = datetime.now(timezone.utc)
+    today = (now.year, now.month)
+
+    if isinstance(raw, str):
+        text = raw.strip()
+        has_duration = bool(re.search(r"\b\d+\s*(yr|yrs|year|years|mo|mos|month|months)\b", text, re.I))
+        if has_duration:
+            return text
+        is_present = bool(re.search(r"present|current|now", text, re.I))
+        years = re.findall(r"[A-Za-z]{3,9}\.?\s+\d{4}|\d{4}", text)
+        start = _to_ym(years[0]) if years else None
+        end = today if is_present else (_to_ym(years[1]) if len(years) > 1 else None)
+        if start and end:
+            dur = _duration_text(start, end)
+            return f"{text} · {dur}" if dur else text
+        return text
+
+    start_raw = _first(exp, _START_KEYS)
+    end_raw = _first(exp, _END_KEYS)
+    if isinstance(raw, dict):  # {"start": {...}, "end": {...}}
+        start_raw = start_raw or _first(raw, _START_KEYS)
+        end_raw = end_raw or _first(raw, _END_KEYS)
+    start = _to_ym(start_raw)
+    if not start:
+        return str(raw) if raw else None
+    end = _to_ym(end_raw)
+    is_present = end is None or bool(exp.get("is_current") or exp.get("current"))
+    end_ym = today if is_present else end
+    dur = _duration_text(start, end_ym)
+    label = f"{_label(start)} - {'Present' if is_present else _label(end)}"
+    return f"{label} · {dur}" if dur else label
 
 # --------------------------------------------------------------------------
 # ChocoData
@@ -67,7 +173,7 @@ def _from_chocodata(data, record):
         "headline": data.get("headline"),
         "current_job_title": current.get("title"),
         "current_company": current_company,
-        "employment_start_date": current.get("date_range"),
+        "employment_start_date": employment_dates(current),
         "previous_job_title": previous.get("title"),
         "previous_company": previous.get("company"),
         "industry": None,

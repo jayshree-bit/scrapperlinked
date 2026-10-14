@@ -41,6 +41,18 @@ def read_connections(path):
     return out
 
 
+def _position_summary(row):
+    """One-cell summary, e.g.
+    'Co-Founder & CTO · Bytestrone · Aug 2021 - Present · 5 yrs 3 mos'"""
+    parts = [
+        row.get("current_job_title"),
+        row.get("current_company"),
+        row.get("employment_start_date"),
+    ]
+    cleaned = [str(p).strip() for p in parts if not pd.isna(p) and str(p).strip()]
+    return " · ".join(cleaned)
+
+
 def export_report(collection, output_path):
     rows = list(collection.find({}, {"_id": 0}).sort("updated_at", -1))
     df = pd.DataFrame(rows)
@@ -54,6 +66,16 @@ def export_report(collection, output_path):
         if col not in df.columns:
             df[col] = None
     report = df[columns].copy()
+
+    # Combined column: title · company · dates/duration
+    report.insert(
+        report.columns.get_loc("current_job_title"),
+        "current_position",
+        report.apply(_position_summary, axis=1),
+    )
+    # To keep ONLY the combined column, uncomment:
+    # report = report.drop(columns=["current_job_title", "current_company", "employment_start_date"])
+
     report["checked_at"] = (
         pd.to_datetime(report["checked_at"], errors="coerce", utc=True)
         .dt.strftime("%Y-%m-%d %H:%M")

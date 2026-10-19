@@ -33,6 +33,15 @@ REQUEST_DELAY_SECONDS = get_int("REQUEST_DELAY_SECONDS", 2)
 
 SERPER_API_KEY = os.getenv("SERPER_API_KEY", "").strip().strip("'\"")
 SERPER_URL = os.getenv("SERPER_URL", "https://google.serper.dev/search")
+
+# Apify actor 'anchor/linkedin-profile-enrichment' (~$6 / 1000 profiles, no LinkedIn login).
+APIFY_API_TOKEN = os.getenv("APIFY_API_TOKEN", "").strip().strip("'\"")
+APIFY_ACTOR = os.getenv("APIFY_ACTOR", "anchor~linkedin-profile-enrichment")
+APIFY_BATCH_SIZE = get_int("APIFY_BATCH_SIZE", 25)
+
+# SocialCrawl: full experience history with dates (5 credits per profile).
+SOCIALCRAWL_API_KEY = os.getenv("SOCIALCRAWL_API_KEY", "").strip().strip("'\"")
+SOCIALCRAWL_URL = os.getenv("SOCIALCRAWL_URL", "https://www.socialcrawl.dev/v1/linkedin/profile/experiences")
 # chocodata_then_serper | serper_only | chocodata_only
 PROVIDER_MODE = os.getenv("PROVIDER_MODE", "chocodata_then_serper")
 
@@ -40,3 +49,8 @@ INPUT_FILE = os.getenv("INPUT_FILE", "sample_prospects.csv")
 OUTPUT_FILE = os.getenv("OUTPUT_FILE", "verification_report.xlsx")
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 BROWSER_PROFILE_DIR = os.getenv("BROWSER_PROFILE_DIR", ".browser_profile")
+
+# Mindcase 'linkedin/profiles' (~0.4 cents per profile, no LinkedIn login). pip install mindcase
+MINDCASE_API_KEY = os.getenv("MINDCASE_API_KEY", "").strip().strip("'\"")
+MINDCASE_BATCH_SIZE = get_int("MINDCASE_BATCH_SIZE", 25)
+MINDCASE_TIMEOUT_SECONDS = get_int("MINDCASE_TIMEOUT_SECONDS", 300)

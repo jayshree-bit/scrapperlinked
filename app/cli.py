@@ -1,6 +1,7 @@
 import argparse
 import json
 import logging
+import random
 import time
 
 from app import config
@@ -32,12 +33,26 @@ def import_mongo(db):
     log.info("Enqueued %s records from MongoDB input collection", count)
 
 
-def process(db, limit=None):
-    provider = EmploymentProvider()
+def _pause(seconds, stop_event=None):
+    """Sleep with +/-30% jitter so requests don't go out on a fixed beat."""
+    seconds = max(0.0, seconds * random.uniform(0.7, 1.3))
+    if stop_event is not None:
+        return stop_event.wait(seconds)
+    time.sleep(seconds)
+    return False
+
+
+def process(db, limit=None, batch_id=None, stop_event=None, use_socialcrawl=False):
+    """Work through the queue one record at a time. Returns why it stopped."""
+    provider = EmploymentProvider(use_socialcrawl=use_socialcrawl)
     processed = 0
     consecutive_errors = 0
+    reason = "Queue empty: all records processed"
     while limit is None or processed < limit:
-        record = db.claim_one()
+        if stop_event is not None and stop_event.is_set():
+            reason = "Stopped by user"
+            break
+        record = db.claim_one(batch_id)
         if not record:
             break
         try:
@@ -59,23 +74,119 @@ def process(db, limit=None):
                         record.get("linkedin_url"), exc.retryable, will_retry, exc)
             if exc.status == "restricted" or "rate limit" in str(exc).lower():
                 log.error("Stopping batch: restricted / rate-limited / auth problem.")
+                reason = f"Stopped to protect the account/API: {exc}"[:500]
                 break
             consecutive_errors += 1
             if consecutive_errors >= config.MAX_CONSECUTIVE_ERRORS:
                 log.error("Stopping batch: %d provider errors in a row. Check the provider "
                           "(try `probe <url>`), then run `requeue` and `process` again.",
                           consecutive_errors)
+                reason = f"Stopped after {consecutive_errors} provider errors in a row: {exc}"[:500]
                 break
             if exc.retryable:
                 attempts = record.get("attempts", 0)
                 delay = min(config.RETRY_BASE_SECONDS * (2 ** attempts), config.RETRY_MAX_SECONDS)
-                time.sleep(delay)
+                _pause(delay, stop_event)
         except Exception as exc:
             db.fail(record, "needs_review", f"Unexpected error: {exc}", retry=False)
             log.exception("Unexpected processing error")
-        time.sleep(config.REQUEST_DELAY_SECONDS)
         processed += 1
-    log.info("Processing run finished. Processed this run: %d", processed)
+        if _pause(config.REQUEST_DELAY_SECONDS, stop_event):
+            reason = "Stopped by user"
+            break
+    else:
+        reason = f"Reached limit of {limit} records"
+    log.info("Processing run finished. Processed this run: %d (%s)", processed, reason)
+    return {"processed": processed, "reason": reason}
+
+
+def process_apify(db, limit=None, batch_id=None, stop_event=None):
+    """Like process(), but sends APIFY_BATCH_SIZE profiles per Apify run
+    (each run has a start fee, so batching keeps the cost per profile low)."""
+    from app.provider import apify_fetch_many, from_apify
+    processed = 0
+    reason = "Queue empty: all records processed"
+    while limit is None or processed < limit:
+        if stop_event is not None and stop_event.is_set():
+            reason = "Stopped by user"
+            break
+        size = config.APIFY_BATCH_SIZE if limit is None else min(config.APIFY_BATCH_SIZE, limit - processed)
+        claimed = []
+        for _ in range(size):
+            rec = db.claim_one(batch_id)
+            if not rec:
+                break
+            claimed.append(rec)
+        if not claimed:
+            break
+        urls = [r.get("linkedin_url") for r in claimed]
+        try:
+            results = apify_fetch_many(urls)
+        except ProviderError as exc:
+            for rec in claimed:
+                db.fail(rec, exc.status, str(exc), retry=exc.retryable)
+            log.error("Apify run failed for %d records: %s", len(claimed), exc)
+            reason = f"Stopped: {exc}"[:500]
+            break
+        for rec in claimed:
+            try:
+                fields = from_apify(results.get(rec.get("linkedin_url")), rec)
+                db.finish(rec.get("prospect_id"), rec.get("linkedin_url"), fields)
+            except ProviderError as exc:
+                db.fail(rec, exc.status, str(exc), retry=False)
+            processed += 1
+        log.info("Apify run: %d profiles (%d total this run)", len(claimed), processed)
+        if _pause(config.REQUEST_DELAY_SECONDS, stop_event):
+            reason = "Stopped by user"
+            break
+    else:
+        reason = f"Reached limit of {limit} records"
+    log.info("Apify processing finished. Processed this run: %d (%s)", processed, reason)
+    return {"processed": processed, "reason": reason}
+
+
+def process_mindcase(db, limit=None, batch_id=None, stop_event=None):
+    """Like process_apify(): MINDCASE_BATCH_SIZE profiles per Mindcase call."""
+    from app.provider import mindcase_fetch_many, from_mindcase
+    processed = 0
+    reason = "Queue empty: all records processed"
+    while limit is None or processed < limit:
+        if stop_event is not None and stop_event.is_set():
+            reason = "Stopped by user"
+            break
+        size = config.MINDCASE_BATCH_SIZE if limit is None else min(config.MINDCASE_BATCH_SIZE, limit - processed)
+        claimed = []
+        for _ in range(size):
+            rec = db.claim_one(batch_id)
+            if not rec:
+                break
+            claimed.append(rec)
+        if not claimed:
+            break
+        urls = [r.get("linkedin_url") for r in claimed]
+        try:
+            results = mindcase_fetch_many(urls)
+        except ProviderError as exc:
+            for rec in claimed:
+                db.fail(rec, exc.status, str(exc), retry=exc.retryable)
+            log.error("Mindcase call failed for %d records: %s", len(claimed), exc)
+            reason = f"Stopped: {exc}"[:500]
+            break
+        for rec in claimed:
+            try:
+                fields = from_mindcase(results.get(rec.get("linkedin_url")), rec)
+                db.finish(rec.get("prospect_id"), rec.get("linkedin_url"), fields)
+            except ProviderError as exc:
+                db.fail(rec, exc.status, str(exc), retry=False)
+            processed += 1
+        log.info("Mindcase run: %d profiles (%d total this run)", len(claimed), processed)
+        if _pause(config.REQUEST_DELAY_SECONDS, stop_event):
+            reason = "Stopped by user"
+            break
+    else:
+        reason = f"Reached limit of {limit} records"
+    log.info("Mindcase processing finished. Processed this run: %d (%s)", processed, reason)
+    return {"processed": processed, "reason": reason}
 
 
 def status(db):
@@ -85,6 +196,13 @@ def status(db):
         print(st, db.output.count_documents({"task_status": st}))
     print("verified", db.output.count_documents(
         {"task_status": "completed", "verification_status": "verified"}))
+
+
+def probe_mindcase(url):
+    """Call Mindcase once and print the raw row (no DB writes). Use this to see
+    the real field names if a column comes back empty."""
+    from app.provider import mindcase_fetch_many
+    print(json.dumps(mindcase_fetch_many([url]).get(url), indent=2, default=str)[:6000])
 
 
 def probe(url):
@@ -155,6 +273,7 @@ def main():
     p = sub.add_parser("process"); p.add_argument("--limit", type=int, default=None)
     p = sub.add_parser("review"); p.add_argument("--limit", type=int, default=None)
     p = sub.add_parser("probe"); p.add_argument("url")
+    p = sub.add_parser("probe-mindcase"); p.add_argument("url")
     sub.add_parser("status")
     sub.add_parser("requeue")
     sub.add_parser("requeue-all")
@@ -170,6 +289,8 @@ def main():
         process(db, args.limit)
     elif args.command == "review":
         review(db, args.limit)
+    elif args.command == "probe-mindcase":
+        probe_mindcase(args.url)
     elif args.command == "status":
         status(db)
     elif args.command == "probe":

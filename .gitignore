@@ -4,3 +4,12 @@ __pycache__/
 *.py[cod]
 process.out
 .~lock.*#
+
+# secrets and generated data
+.env
+.env.*
+!.env.example
+uploads/
+.browser_profile/
+*.log
+verification_report*.xlsx

@@ -24,8 +24,10 @@ class Database:
         self.output.create_index([("linkedin_url", ASCENDING)], unique=True, sparse=True)
         self.output.create_index([("verification_status", ASCENDING), ("updated_at", ASCENDING)])
         self.output.create_index([("task_status", ASCENDING), ("updated_at", ASCENDING)])
+        self.output.create_index([("batch_ids", ASCENDING)])
+        self.batches = db["upload_batches"]
 
-    def enqueue(self, record):
+    def enqueue(self, record, batch_id=None):
         url = (record.get("linkedin_url") or "").strip()
         pid = record.get("prospect_id")
         if not pid and not url:
@@ -55,13 +57,18 @@ class Database:
         update = {"$setOnInsert": on_insert}
         if to_set:
             update["$set"] = to_set
+        if batch_id:
+            update["$addToSet"] = {"batch_ids": batch_id}
 
         result = self.output.update_one(key, update, upsert=True)
         return "inserted" if result.upserted_id else "existing"
 
-    def claim_one(self):
+    def claim_one(self, batch_id=None):
+        query = {"task_status": {"$in": ["pending", "retry"]}}
+        if batch_id:
+            query["batch_ids"] = batch_id
         return self.output.find_one_and_update(
-            {"task_status": {"$in": ["pending", "retry"]}},
+            query,
             {"$set": {"task_status": "processing", "updated_at": utcnow()}},
             sort=[("updated_at", 1)],
             return_document=ReturnDocument.AFTER,

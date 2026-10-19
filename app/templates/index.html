@@ -1,0 +1,457 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Prospect Verifier</title>
+<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+<style>
+  /* Only what Bootstrap has no class for: drop zone, sticky grid columns, cell truncation */
+  #drop { border: 2px dashed var(--bs-border-color); cursor: pointer; transition: .15s; }
+  #drop.over, #drop:hover { border-color: var(--bs-primary); background: var(--bs-primary-bg-subtle); color: var(--bs-primary); }
+  .stat { cursor: pointer; }
+  .stat b { font-size: 1.35rem; display: block; }
+  .gridwrap { max-height: 72vh; }
+  #grid { width: max-content; min-width: 100%; font-size: .85rem; }
+  #grid thead th { position: sticky; top: 0; z-index: 2; background: var(--bs-tertiary-bg); cursor: pointer;
+                   user-select: none; white-space: nowrap; text-transform: uppercase; font-size: .7rem; letter-spacing: .04em; }
+  #grid td { max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #grid td.wrap { white-space: normal; min-width: 260px; }
+  #grid .sticky-l, #grid .sticky-r { position: sticky; background: var(--bs-body-bg); z-index: 1; }
+  #grid .sticky-l { left: 0; box-shadow: 1px 0 0 var(--bs-border-color); }
+  #grid .sticky-r { right: 0; box-shadow: -1px 0 0 var(--bs-border-color); min-width: 150px; white-space: normal; }
+  #grid thead .sticky-l, #grid thead .sticky-r { z-index: 3; background: var(--bs-tertiary-bg); }
+  #grid th.num, #grid td.num { text-align: right; width: 48px; color: var(--bs-secondary-color); }
+  .empty { text-align: center; color: var(--bs-secondary-color); padding: 1.5rem !important; }
+  #colList { min-width: 220px; max-height: 340px; overflow: auto; }
+</style>
+</head>
+<body class="bg-body-tertiary">
+<nav class="navbar bg-body border-bottom">
+  <div class="container-fluid">
+    <span class="navbar-brand mb-0 h1 fs-5">Prospect Verifier</span>
+    <span class="navbar-text small d-none d-md-inline">Upload LinkedIn URLs &rarr; get each prospect's current job</span>
+  </div>
+</nav>
+
+<main class="container-fluid px-3 px-lg-4 py-3">
+
+  <section class="card shadow-sm mb-3">
+    <div class="card-body">
+      <h2 class="h6 mb-3">1. Upload Excel / CSV</h2>
+      <div id="drop" class="rounded-3 text-center text-body-secondary p-4">
+        <strong class="text-body">Drop a file here</strong> or click to choose<br>
+        <span class="small">.xlsx &middot; .xls &middot; .csv. Any column that contains linkedin.com/in/&hellip; URLs is detected automatically.</span>
+      </div>
+      <input id="file" type="file" accept=".xlsx,.xls,.xlsm,.csv" hidden>
+    </div>
+  </section>
+
+  <section class="card shadow-sm mb-3">
+    <div class="card-body">
+      <h2 class="h6 mb-3">2. Run</h2>
+      <div class="row g-2 align-items-end">
+        <div class="col-12 col-lg">
+          <label class="form-label small mb-1" for="batch">Upload</label>
+          <select id="batch" class="form-select form-select-sm"></select>
+        </div>
+        <div class="col-5 col-sm-3 col-lg-1">
+          <label class="form-label small mb-1" for="limit">Limit</label>
+          <input id="limit" type="number" min="0" placeholder="all" class="form-control form-control-sm">
+        </div>
+        <div class="col-7 col-sm-9 col-lg-5">
+          <label class="form-label small mb-1" for="source">Source</label>
+          <select id="source" class="form-select form-select-sm">
+            <option value="free">Free: ChocoData + Google (title, company)</option>
+            <option value="apify" disabled>Apify: title, company, start year (~$0.006/profile)</option>
+            <option value="mindcase" disabled>Mindcase: full dates, duration, type if available (~0.4&cent;/profile)</option>
+            <option value="socialcrawl" disabled>SocialCrawl: full dates, type, work mode (5 credits/profile)</option>
+          </select>
+        </div>
+      </div>
+      <div id="srcInfo" class="small text-body-secondary mt-2"></div>
+      <div class="d-flex flex-wrap gap-2 mt-3">
+        <button id="start" class="btn btn-primary btn-sm">Start scraping</button>
+        <button id="stop" class="btn btn-outline-danger btn-sm" disabled>Stop</button>
+        <button id="retry" class="btn btn-outline-secondary btn-sm" title="Put failed and incomplete (needs review) records back in the queue">Re-check failed</button>
+        <button id="noDates" class="btn btn-outline-secondary btn-sm" title="Put finished rows that have no start date back in the queue, to run them with Apify, Mindcase or SocialCrawl">Re-check rows without dates</button>
+        <button id="export" class="btn btn-outline-success btn-sm ms-lg-auto">Download Excel</button>
+      </div>
+
+      <div id="stats" class="row row-cols-2 row-cols-sm-3 row-cols-xl-6 g-2 my-3"></div>
+      <div class="progress" style="height:8px"><div id="progress" class="progress-bar" style="width:0"></div></div>
+      <div id="msg" class="small text-body-secondary mt-2" style="min-height:1.3em"></div>
+      <div class="small text-body-secondary mt-1">
+        Lookups go through the ChocoData / Serper APIs, so your computer never contacts LinkedIn directly.
+        Records are fetched one at a time with randomized delays, and the run stops on its own if the API reports a rate limit.
+      </div>
+    </div>
+  </section>
+
+  <section class="card shadow-sm">
+    <div class="card-body">
+      <h2 class="h6 mb-3">3. Results</h2>
+      <div class="row g-2 align-items-center mb-2">
+        <div class="col-12 col-md-5 col-lg-4">
+          <input id="gridFilter" type="search" class="form-control form-control-sm" placeholder="Filter rows on this page&hellip;">
+        </div>
+        <div class="col-6 col-md-auto">
+          <div class="input-group input-group-sm">
+            <span class="input-group-text">Rows</span>
+            <select id="pageSize" class="form-select form-select-sm"><option>50</option><option selected>100</option><option>200</option><option>500</option></select>
+          </div>
+        </div>
+        <div class="col-6 col-md text-md-end small text-body-secondary" id="gridCount"></div>
+        <div class="col-12 col-md-auto">
+          <div class="dropdown">
+            <button class="btn btn-outline-secondary btn-sm dropdown-toggle w-100" type="button" data-bs-toggle="dropdown" data-bs-auto-close="outside">Columns</button>
+            <div class="dropdown-menu dropdown-menu-end p-2" id="colList"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="table-responsive gridwrap border rounded">
+        <table id="grid" class="table table-sm table-hover table-striped align-middle mb-0">
+          <thead id="gridHead"></thead>
+          <tbody id="rows"><tr><td class="empty">Upload a file to begin.</td></tr></tbody>
+        </table>
+      </div>
+
+      <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mt-2">
+        <span id="pageinfo" class="small text-body-secondary"></span>
+        <div class="btn-group btn-group-sm">
+          <button id="prev" class="btn btn-outline-secondary">&lsaquo; Prev</button>
+          <button id="next" class="btn btn-outline-secondary">Next &rsaquo;</button>
+        </div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<div class="modal fade" id="paste" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered modal-fullscreen-sm-down">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h2 class="modal-title h6" id="pasteTitle">Paste details</h2>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <ol class="small text-body-secondary ps-3">
+          <li><a id="pasteOpen" href="#" target="_blank" rel="noopener">Open the LinkedIn profile &nearr;</a></li>
+          <li>In <b>Experience</b>, select the top (current) entry, from the title down to the location/work mode line, and copy it.</li>
+          <li>Paste it below and save.</li>
+        </ol>
+        <textarea id="pasteText" class="form-control font-monospace" rows="8" placeholder="Engineer - Cloud & Infra Management
+LTM · Full-time
+Sep 2025 - Present · 1 yr 2 mos
+Hybrid"></textarea>
+        <div id="pasteMsg" class="small mt-2" style="min-height:1.3em"></div>
+      </div>
+      <div class="modal-footer">
+        <button id="pasteCancel" class="btn btn-outline-secondary btn-sm" data-bs-dismiss="modal">Cancel</button>
+        <button id="pasteSave" class="btn btn-primary btn-sm">Save</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+<script>
+const $ = s => document.querySelector(s);
+const state = { batch: null, filter: "", page: 1, size: 100, timer: null, running: false };
+const esc = v => (v ?? "").toString().replace(/[&<>"']/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c]));
+
+function msg(text, err = false) { const m = $("#msg"); m.textContent = text || ""; m.className = "small mt-2 " + (err ? "text-danger" : "text-body-secondary"); }
+
+async function api(url, opts = {}) {
+  const r = await fetch(url, opts);
+  const ct = r.headers.get("content-type") || "";
+  const body = ct.includes("json") ? await r.json() : {};
+  if (!r.ok) throw new Error(body.error || `HTTP ${r.status}`);
+  return body;
+}
+
+// ---- upload
+const drop = $("#drop"), file = $("#file");
+drop.onclick = () => file.click();
+drop.ondragover = e => { e.preventDefault(); drop.classList.add("over"); };
+drop.ondragleave = () => drop.classList.remove("over");
+drop.ondrop = e => { e.preventDefault(); drop.classList.remove("over"); if (e.dataTransfer.files[0]) upload(e.dataTransfer.files[0]); };
+file.onchange = () => file.files[0] && upload(file.files[0]);
+
+async function upload(f) {
+  msg(`Uploading ${f.name}…`);
+  const fd = new FormData(); fd.append("file", f);
+  try {
+    const r = await api("/api/upload", { method: "POST", body: fd });
+    const i = r.imported;
+    msg(`${r.filename}: ${r.counts.total} prospects (${i.inserted} new, ${i.existing} already known; results for those are reused). Press "Start scraping".`);
+    await loadBatches(r.batch_id);
+  } catch (e) { msg(e.message, true); }
+  file.value = "";
+}
+
+// ---- batches
+async function loadBatches(select) {
+  const list = await api("/api/batches");
+  const sel = $("#batch");
+  sel.innerHTML = list.length ? "" : `<option value="">No uploads yet</option>`;
+  for (const b of list) {
+    const o = document.createElement("option");
+    o.value = b.batch_id;
+    o.textContent = `${b.filename}  (${b.counts.total} rows · ${new Date(b.uploaded_at).toLocaleString()})`;
+    sel.appendChild(o);
+  }
+  if (select) sel.value = select;
+  state.batch = sel.value || null; state.page = 1;
+  refresh();
+}
+$("#batch").onchange = e => { state.batch = e.target.value; state.page = 1; state.filter = ""; refresh(); };
+
+// ---- run controls
+$("#start").onclick = async () => {
+  if (!state.batch) return msg("Upload a file first.", true);
+  try {
+    await api(`/api/batches/${state.batch}/start`, { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ limit: $("#limit").value || null, source: $("#source").value }) });
+    msg("Running…"); refresh();
+  } catch (e) { msg(e.message, true); }
+};
+$("#stop").onclick = async () => { await api("/api/stop", { method: "POST" }); msg("Stopping after the current record…"); };
+$("#retry").onclick = async () => {
+  if (!state.batch) return;
+  const r = await api(`/api/batches/${state.batch}/retry-failed`, { method: "POST" });
+  msg(`${r.requeued} records put back in the queue. Press "Start scraping".`); refresh();
+};
+$("#noDates").onclick = async () => {
+  if (!state.batch) return;
+  const r = await api(`/api/batches/${state.batch}/requeue-no-dates`, { method: "POST" });
+  msg(`${r.requeued} rows without dates put back in the queue. Choose Mindcase, Apify or SocialCrawl as Source, set a Limit, and press "Start scraping".`); refresh();
+};
+$("#export").onclick =() => state.batch && (location.href = `/api/batches/${state.batch}/export`);
+$("#prev").onclick = () => { if (state.page > 1) { state.page--; refresh(); } };
+$("#next").onclick = () => { state.page++; refresh(); };
+
+// ---- datagrid
+const link = (r) => `<a href="${esc(r.linkedin_url)}" target="_blank" rel="noopener">${esc(r.full_name) || esc((r.linkedin_url || "").replace(/.*\/in\//, "").replace(/\/$/, ""))}</a>`;
+const fmtDate = v => v ? esc(String(v).replace("T", " ").slice(0, 16)) : "";
+const COLUMNS = [
+  { key: "_n",  label: "#",             cls: "num",      get: (r, i) => i + 1,                       html: (r, i) => i + 1, nosort: true, fixed: true },
+  { key: "full_name", label: "Prospect", cls: "sticky-l", get: r => r.full_name || r.linkedin_url,    html: r => link(r), fixed: true },
+  { key: "headline", label: "Headline", get: r => r.headline,                                         html: r => esc(r.headline), wrap: true },
+  { key: "current_job_title", label: "Current job title", get: r => r.current_job_title,            html: r => esc(r.current_job_title), wrap: true },
+  { key: "current_company", label: "Company", get: r => r.current_company,                           html: r => `<b>${esc(r.current_company)}</b>` },
+  { key: "employment_type", label: "Type", get: r => r.employment_type,                              html: r => esc(r.employment_type) },
+  { key: "since", label: "Working since", get: r => r.employment_dates || r.employment_start_date,   html: r => since(r) },
+  { key: "employment_duration", label: "Duration", get: r => r.employment_duration,                  html: r => esc(r.employment_duration) },
+  { key: "work_mode", label: "Work mode", get: r => r.work_mode,                                      html: r => esc(r.work_mode) },
+  { key: "job_location", label: "Job location", get: r => r.job_location,                            html: r => esc(r.job_location) },
+  { key: "location", label: "Profile location", get: r => r.location,                                html: r => esc(r.location) },
+  { key: "industry", label: "Industry", get: r => r.industry,                                         html: r => esc(r.industry), off: true },
+  { key: "company_duration", label: "Time at company", get: r => r.company_duration,                 html: r => esc(r.company_duration), off: true },
+  { key: "previous_job_title", label: "Previous title", get: r => r.previous_job_title,             html: r => esc(r.previous_job_title), off: true },
+  { key: "previous_company", label: "Previous company", get: r => r.previous_company,               html: r => esc(r.previous_company), off: true },
+  { key: "linkedin_url", label: "LinkedIn URL", get: r => r.linkedin_url,                            html: r => `<a href="${esc(r.linkedin_url)}" target="_blank" rel="noopener">${esc(r.linkedin_url)}</a>`, off: true },
+  { key: "source", label: "Source", get: r => r.source,                                              html: r => esc(r.source) },
+  { key: "verification_status", label: "Verification", get: r => r.verification_status,             html: r => esc(r.verification_status), off: true },
+  { key: "task_status", label: "Status", get: r => r.task_status,                                    html: r => statusPill(r) },
+  { key: "checked_at", label: "Checked at", get: r => r.checked_at,                                  html: r => fmtDate(r.checked_at) },
+  { key: "error_message", label: "Error / note", get: r => r.error_message,                          html: r => esc(r.error_message), wrap: true },
+  { key: "_actions", label: "Actions", cls: "sticky-r", nosort: true, fixed: true, get: () => "",
+    html: r => `<span class="actions-cell">
+        ${mc.enabled ? `<button class="btn btn-link btn-sm p-0 me-2" data-mc="${esc(r.linkedin_url)}">⚡ Mindcase</button> ` : ""}
+        ${ap.enabled ? `<button class="btn btn-link btn-sm p-0 me-2" data-ap="${esc(r.linkedin_url)}">⚡ Apify</button> ` : ""}
+        ${sc.enabled ? `<button class="btn btn-link btn-sm p-0 me-2" data-sc="${esc(r.linkedin_url)}">⚡ SocialCrawl</button> ` : ""}
+        <button class="btn btn-link btn-sm p-0 me-2" data-paste="${esc(r.linkedin_url)}" data-name="${esc(r.full_name)}">✎ Paste</button></span>` },
+];
+let hidden;
+try { hidden = new Set(JSON.parse(localStorage.getItem("gridHidden") || "null") ?? COLUMNS.filter(c => c.off).map(c => c.key)); }
+catch (e) { hidden = new Set(COLUMNS.filter(c => c.off).map(c => c.key)); }
+const gstate = { sort: null, dir: 1, q: "" };
+state.rows = [];
+
+function visibleCols() { return COLUMNS.filter(c => c.fixed || !hidden.has(c.key)); }
+
+function renderColMenu() {
+  $("#colList").innerHTML = COLUMNS.filter(c => !c.fixed).map(c =>
+    `<div class="form-check"><input class="form-check-input" type="checkbox" id="col_${c.key}" data-col="${c.key}" ${hidden.has(c.key) ? "" : "checked"}>
+       <label class="form-check-label small" for="col_${c.key}">${esc(c.label)}</label></div>`).join("");
+  document.querySelectorAll("[data-col]").forEach(cb => cb.onchange = () => {
+    cb.checked ? hidden.delete(cb.dataset.col) : hidden.add(cb.dataset.col);
+    try { localStorage.setItem("gridHidden", JSON.stringify([...hidden])); } catch (e) {}
+    renderGrid();
+  });
+}
+
+function renderGrid() {
+  const cols = visibleCols();
+  $("#gridHead").innerHTML = `<tr>${cols.map(c => `<th class="${c.cls || ""}" data-sort="${c.nosort ? "" : c.key}">${esc(c.label)}${
+    gstate.sort === c.key ? `<span class="text-primary ms-1">${gstate.dir > 0 ? "▲" : "▼"}</span>` : ""}</th>`).join("")}</tr>`;
+  document.querySelectorAll("th[data-sort]").forEach(th => th.onclick = () => {
+    const k = th.dataset.sort; if (!k) return;
+    gstate.dir = gstate.sort === k ? -gstate.dir : 1; gstate.sort = k; renderGrid();
+  });
+
+  let rows = state.rows.slice();
+  const q = gstate.q.trim().toLowerCase();
+  if (q) rows = rows.filter(r => Object.values(r).some(v => v != null && String(v).toLowerCase().includes(q)));
+  const col = COLUMNS.find(c => c.key === gstate.sort);
+  if (col) rows.sort((a, b) => {
+    const x = (col.get(a) ?? "").toString().toLowerCase(), y = (col.get(b) ?? "").toString().toLowerCase();
+    if (!x && y) return 1; if (x && !y) return -1;               // blanks last
+    return x.localeCompare(y, undefined, { numeric: true }) * gstate.dir;
+  });
+
+  $("#rows").innerHTML = rows.length ? rows.map((r, i) => `<tr>${cols.map(c => {
+    const cls = [c.cls, c.wrap ? "wrap" : ""].filter(Boolean).join(" ");
+    const tip = c.nosort ? "" : ` title="${esc(c.get(r, i))}"`;
+    return `<td class="${cls}"${tip}>${c.html(r, i)}</td>`;
+  }).join("")}</tr>`).join("") : `<tr><td class="empty" colspan="${cols.length}">${state.rows.length ? "No rows match the filter." : "No records in this view."}</td></tr>`;
+  $("#gridCount").textContent = `${rows.length} of ${state.rows.length} rows shown`;
+
+  document.querySelectorAll("[data-paste]").forEach(b => b.onclick = () => openPaste(b.dataset.paste, b.dataset.name));
+  document.querySelectorAll("[data-sc]").forEach(b => b.onclick = () => fetchDates(b, b.dataset.sc));
+  document.querySelectorAll("[data-mc]").forEach(b => b.onclick = () => fetchDatesMindcase(b, b.dataset.mc));
+  document.querySelectorAll("[data-ap]").forEach(b => b.onclick = () => fetchDatesApify(b, b.dataset.ap));
+}
+
+$("#gridFilter").oninput = e => { gstate.q = e.target.value; renderGrid(); };
+$("#pageSize").onchange = e => { state.size = +e.target.value; state.page = 1; refresh(); };
+renderColMenu();
+
+// ---- render
+const STATS = [
+  ["", "Total"], ["verified", "Found current job"], ["pending", "Waiting"],
+  ["completed", "Done"], ["retry", "Retrying"], ["failed", "Failed"],
+];
+
+function statusPill(r) {
+  if (r.task_status === "completed" && r.verification_status === "verified") return `<span class="badge text-bg-success">Found</span>`;
+  if (r.task_status === "completed") return `<span class="badge text-bg-warning">Partial</span>`;
+  if (r.task_status === "failed") return `<span class="badge text-bg-danger">Failed</span>`;
+  if (r.task_status === "retry") return `<span class="badge text-bg-warning">Retrying</span>`;
+  if (r.task_status === "processing") return `<span class="badge text-bg-warning">Working…</span>`;
+  return `<span class="badge text-bg-secondary">Waiting</span>`;
+}
+
+function since(r) {
+  const d = r.employment_dates || r.employment_start_date;
+  if (!d) return "";
+  return esc(d).replace(/Present/i, `<span class="text-success fw-semibold">Present</span>`);
+}
+
+function render(data) {
+  const c = data.counts, w = data.worker;
+  $("#stats").innerHTML = STATS.map(([k, label]) => {
+    const n = k === "" ? c.total : c[k];
+    const on = state.filter === k;
+    return `<div class="col"><div class="stat card h-100 ${on ? "border-primary bg-primary-subtle" : ""}" data-k="${k}"><div class="card-body py-2 px-3"><b>${n}</b><small class="text-body-secondary">${label}</small></div></div></div>`;
+  }).join("");
+  document.querySelectorAll(".stat[data-k]").forEach(el => el.onclick = () => { state.filter = el.dataset.k; state.page = 1; refresh(); });
+
+  const done = c.completed + c.failed;
+  $("#progress").style.width = c.total ? `${(100 * done / c.total).toFixed(1)}%` : "0";
+
+  const mine = w.batch_id === state.batch;
+  state.running = w.running;
+  $("#start").disabled = w.running;
+  $("#stop").disabled = !w.running;
+  if (w.running && !mine) msg("Another upload is running. Stop it first to run this one.");
+  else if (mine && w.message && !w.running) msg(`Last run: ${w.message} (${w.processed} processed)`, w.message.startsWith("Stopped after") || w.message.startsWith("Error"));
+  else if (mine && w.running) msg(`Running… ${done} / ${c.total} done`);
+
+  state.rows = data.rows;
+  renderGrid();
+
+  const pages = Math.max(1, Math.ceil(data.matching / state.size));
+  if (state.page > pages) state.page = pages;
+  $("#pageinfo").textContent = `${data.matching} records · page ${state.page} of ${pages}`;
+  $("#prev").disabled = state.page <= 1;
+  $("#next").disabled = state.page >= pages;
+}
+
+async function refresh() {
+  clearTimeout(state.timer);
+  if (state.batch) {
+    try {
+      const q = new URLSearchParams({ page: state.page, size: state.size });
+      if (state.filter) q.set("status", state.filter);
+      render(await api(`/api/batches/${state.batch}?${q}`));
+    } catch (e) { msg(e.message, true); }
+  }
+  state.timer = setTimeout(refresh, state.running ? 2500 : 8000);
+}
+
+// ---- SocialCrawl (paid credits): full experience with dates
+const sc = { enabled: false, credits: null };
+const ap = { enabled: false };
+const mc = { enabled: false };
+async function loadSc() {
+  try {
+    const r = await api("/api/socialcrawl");
+    sc.enabled = r.enabled; sc.credits = r.credits_remaining; ap.enabled = r.apify_enabled; mc.enabled = r.mindcase_enabled;
+    $("#source option[value=apify]").disabled = !r.apify_enabled;
+    $("#source option[value=socialcrawl]").disabled = !r.enabled;
+    $("#source option[value=mindcase]").disabled = !r.mindcase_enabled;
+    const parts = [];
+    if (r.apify_enabled) parts.push(`Apify: $${(r.apify_usage_usd ?? 0).toFixed(3)} of $${r.apify_limit_usd ?? 5} used this month`);
+    if (r.mindcase_enabled) parts.push("Mindcase ready");
+    if (r.enabled) parts.push(`SocialCrawl: ${r.credits_remaining ?? "?"} credits left`);
+    $("#srcInfo").textContent = parts.join(" · ");
+  } catch (e) { /* optional feature */ }
+}
+async function fetchDates(btn, url) {
+  btn.disabled = true; btn.textContent = "Fetching…";
+  try {
+    const r = await api("/api/records/socialcrawl", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ linkedin_url: url }) });
+    msg(`Saved: ${[r.current_job_title, r.current_company, r.employment_type, r.employment_start_date, r.job_location, r.work_mode].filter(Boolean).join(" · ")} (${r.credits_remaining ?? "?"} credits left)`);
+    loadSc(); refresh();
+  } catch (e) { msg(e.message, true); btn.disabled = false; btn.textContent = "⚡ Get dates (5 credits)"; }
+}
+
+async function fetchDatesMindcase(btn, url) {
+  btn.disabled = true; btn.textContent = "Fetching…";
+  try {
+    const r = await api("/api/records/mindcase", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ linkedin_url: url }) });
+    msg(`Saved (Mindcase): ${[r.current_job_title, r.current_company, r.employment_type, r.employment_start_date, r.job_location, r.work_mode].filter(Boolean).join(" · ")}`);
+    loadSc(); refresh();
+  } catch (e) { msg(e.message, true); btn.disabled = false; btn.textContent = "⚡ Get dates (Mindcase)"; }
+}
+
+async function fetchDatesApify(btn, url) {
+  btn.disabled = true; btn.textContent = "Fetching…";
+  try {
+    const r = await api("/api/records/apify", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ linkedin_url: url }) });
+    msg(`Saved (Apify): ${[r.current_job_title, r.current_company, r.employment_type, r.employment_start_date, r.job_location, r.work_mode].filter(Boolean).join(" · ")}`);
+    loadSc(); refresh();
+  } catch (e) { msg(e.message, true); btn.disabled = false; btn.textContent = "⚡ Get dates (Apify)"; }
+}
+
+// ---- paste details copied from the profile page
+let pasteUrl = null;
+const pasteModal = new bootstrap.Modal($("#paste"));
+$("#paste").addEventListener("shown.bs.modal", () => $("#pasteText").focus());
+function openPaste(url, name) {
+  pasteUrl = url;
+  $("#pasteTitle").textContent = `Paste details: ${name || url.replace(/.*\/in\//, "").replace(/\/$/, "")}`;
+  $("#pasteOpen").href = url;
+  $("#pasteText").value = ""; $("#pasteMsg").textContent = ""; $("#pasteMsg").className = "small mt-2";
+  pasteModal.show();
+}
+$("#pasteSave").onclick = async () => {
+  try {
+    const r = await api("/api/records/paste", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ linkedin_url: pasteUrl, text: $("#pasteText").value }) });
+    pasteModal.hide();
+    msg(`Saved: ${[r.current_job_title, r.current_company, r.employment_type, r.employment_start_date, r.job_location, r.work_mode].filter(Boolean).join(" · ")}`);
+    refresh();
+  } catch (e) { $("#pasteMsg").textContent = e.message; $("#pasteMsg").className = "small mt-2 text-danger"; }
+};
+
+loadSc().then(loadBatches);
+</script>
+</body>
+</html>

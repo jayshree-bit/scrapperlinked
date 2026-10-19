@@ -53,15 +53,19 @@ def _position_summary(row):
     return " · ".join(cleaned)
 
 
-def export_report(collection, output_path):
-    rows = list(collection.find({}, {"_id": 0}).sort("updated_at", -1))
+REPORT_COLUMNS = [
+    "linkedin_url", "full_name", "current_job_title", "current_company",
+    "employment_type", "employment_dates", "employment_duration", "job_location",
+    "work_mode", "employment_start_date", "previous_job_title", "previous_company",
+    "industry", "location", "source", "verification_status",
+    "checked_at", "task_status", "error_message",
+]
+
+
+def export_report(collection, output_path, query=None):
+    rows = list(collection.find(query or {}, {"_id": 0, "raw_experience": 0}).sort("updated_at", -1))
     df = pd.DataFrame(rows)
-    columns = [
-        "linkedin_url", "full_name", "current_job_title", "current_company",
-        "employment_start_date", "previous_job_title", "previous_company",
-        "industry", "location", "source", "verification_status",
-        "checked_at", "task_status", "error_message",
-    ]
+    columns = REPORT_COLUMNS
     for col in columns:
         if col not in df.columns:
             df[col] = None
